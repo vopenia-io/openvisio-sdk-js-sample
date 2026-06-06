@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>@openvisio/sdk-js — sample app</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 0; display: flex; height: 100vh; }
+    aside { width: 300px; padding: 14px; border-right: 1px solid #ddd; box-sizing: border-box; overflow-y: auto; }
+    main { flex: 1; background: #111; padding: 10px; box-sizing: border-box; overflow: auto; position: relative; }
+    #tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+    .tile { position: relative; background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 16/9; }
+    .tile video { width: 100%; height: 100%; object-fit: cover; }
+    .tile .name { position: absolute; bottom: 6px; left: 8px; color: #fff; font-size: 12px; background: rgba(0,0,0,.5); padding: 1px 6px; border-radius: 4px; }
+    .tile .react { position: absolute; bottom: 40px; left: 40px; font-size: 28px; animation: pop 1.6s ease forwards; }
+    @keyframes pop { 0%{transform:scale(0);opacity:0} 20%{transform:scale(1.2);opacity:1} 80%{opacity:1} 100%{transform:translateY(-30px);opacity:0} }
+    .tile.speaking { outline: 3px solid #43c463; outline-offset: -3px; }
+    .tile .badges { position: absolute; top: 6px; left: 8px; display: flex; gap: 5px; font-size: 15px; }
+    .tile .badges .mic.muted { opacity: .9; }
+    .tile .hand { display: none; transform-origin: 70% 90%; animation: wave .8s ease-in-out infinite; }
+    @keyframes wave { 0%,100%{transform:rotate(-10deg)} 50%{transform:rotate(12deg)} }
+    .tile .camoff { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; color: #888; font-size: 13px; background: #1a1a1a; }
+    .tile .bubble { position: absolute; bottom: 30px; left: 8px; right: 8px; background: rgba(255,255,255,.94); color: #111; font-size: 12px; padding: 4px 8px; border-radius: 8px; display: none; }
+    #feed { position: absolute; top: 10px; right: 10px; bottom: 10px; width: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; z-index: 4; pointer-events: none; }
+    #feed .item { background: rgba(255,255,255,.93); color: #111; font-size: 12px; line-height: 1.35; padding: 6px 9px; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.3); animation: slidein .2s ease; word-break: break-word; }
+    #feed .item.hand { background: rgba(255,239,184,.96); }
+    #feed .item b { font-weight: 600; }
+    @keyframes slidein { from{opacity:0; transform: translateX(14px)} to{opacity:1; transform:none} }
+    #feed .item.rec { background: rgba(255,205,210,.96); }
+    #recbar { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; z-index: 5; pointer-events: none; }
+    #recbar .pill { display: flex; align-items: center; gap: 6px; background: rgba(0,0,0,.68); color: #fff; font-size: 12px; padding: 4px 11px; border-radius: 14px; }
+    #recbar .pill .dot { width: 9px; height: 9px; border-radius: 50%; background: #e53935; animation: blink 1s steps(2,start) infinite; }
+    #recbar .pill.transcript .dot { background: #ffb300; }
+    @keyframes blink { 50% { opacity: .2; } }
+    h1 { font-size: 16px; margin: 0 0 4px; }
+    h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: #888; margin: 16px 0 4px; }
+    .hint { font-size: 11px; color: #999; margin: 0 0 8px; }
+    button { margin: 3px 0; padding: 7px 8px; cursor: pointer; font-size: 13px; }
+    button:disabled { opacity: .4; cursor: not-allowed; }
+    .row { display: flex; gap: 6px; }
+    .row button { flex: 1; }
+    .full { display: block; width: 100%; }
+    .danger { color: #b00; }
+    input { width: 100%; box-sizing: border-box; padding: 6px; margin: 3px 0; }
+    #role { font: 600 12px/1.4 system-ui; padding: 4px 8px; border-radius: 4px; margin: 6px 0; display: none; }
+    #role.admin { background: #e7f5e7; color: #1a6b1a; }
+    #role.guest { background: #fdf0e3; color: #8a5200; }
+    #divider { border-top: 1px solid #eee; margin-top: 8px;  margin-bottom: 8px; }
+    #log { font: 11px/1.4 monospace; white-space: pre-wrap; margin-top: 14px; color: #444; border-top: 1px solid #eee; padding-top: 8px; }
+    #openvisio-container { width: 100%; height: 100%; display: none; }
+    #openvisio-container iframe { width: 100%; height: 100%; border: 0; }
+    .modetoggle { display: flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 12px; color: #555; }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>@openvisio/sdk-js sample</h1>
+    <p class="hint">Headless by default (<code>livekit-client</code> direct to LiveKit).
+      Toggle iframe mode to load <code>OpenvisioBrowser</code> from the published CDN
+      and embed the OpenVisio web app.</p>
+
+    <label class="modetoggle">
+      <input type="checkbox" id="useIframe" />
+      Use OpenVisio iframe (loads <code>@openvisio/sdk-js/browser</code> from CDN)
+    </label>
+
+    <h2>Portal login (Keycloak — required to create)</h2>
+    <div class="row">
+      <button id="login">log in with Keycloak</button>
+      <button id="logout" disabled>log out</button>
+    </div>
+    <p class="hint" id="me">not logged in — you can only join as guest</p>
+
+    <input id="displayName" placeholder="your display name (used in the call)" />
+    <button id="join" class="full" disabled>① Create room &amp; join (host → admin)</button>
+
+    <h2>…or join an existing room (guest)</h2>
+    <input id="slug" placeholder="slug or full OpenVisio URL" />
+    <input id="bearer" placeholder="Keycloak bearer — private rooms only (optional)" />
+    <button id="joinExisting" class="full">② Join existing</button>
+
+    <div id="role"></div>
+
+    <div id="divider"></div>
+    <h1>Actions for everyone</h1>
+
+    <fieldset id="actions" disabled style="border:0;padding:0;margin:0">
+      <h2>My devices</h2>
+      <div class="row">
+        <button id="myMic">mute me</button>
+        <button id="myCam">cam off</button>
+        <button id="myShare">share screen</button>
+      </div>
+      <div class="row">
+        <button id="myReactPartyPopper">🎉</button>
+        <button id="myReactThumbsUp">👍</button>
+        <button id="myReactClappingHands">👏</button>
+        <button id="myReactFoldedHands">🙏</button>
+        <button id="myReactRedHeart">❤️</button>
+      </div>
+
+      <h2>Requests to the host</h2>
+      <button id="interactions/request-transcription" class="full">Request transcription</button>
+      <button id="interactions/request-recording" class="full">Request recording</button>
+
+
+      <h2>Target participant</h2>
+      <div class="row">
+        <select id="target" style="flex:1"></select>
+        <button id="refresh" style="flex:0 0 auto">⟳</button>
+      </div>
+
+      <h2>Interactions on target — everyone</h2>
+      <div class="row">
+        <button data-post="interactions/mic-mute">mic mute</button>
+        <button data-post="interactions/mic-unmute">mic unmute</button>
+      </div>
+      <div class="row">
+        <button data-post="interactions/camera-disable">cam off</button>
+        <button data-post="interactions/camera-enable">cam on</button>
+      </div>
+      <button id="hand" class="full">raise hand ✋</button>
+      <input id="msg" value="Hello from OpenVisio 👋" />
+      <button id="chat" class="full">send chat 💬</button>
+
+      <h2>Room</h2>
+      <button id="copyLink" class="full">copy invite link 🔗</button>
+      <button id="leave" class="full">leave ✅</button>
+
+      <div id="divider"></div>
+
+      <div id="admin-actions">
+        <h1>Actions for host</h1>
+
+        <h2>Moderation (irreversible)</h2>
+        <div class="row">
+          <button data-post="moderation/mic-mute">force mute</button>
+          <button data-post="moderation/mic-unmute">restore mic</button>
+        </div>
+        <div class="row">
+          <button data-post="moderation/camera-disable">force cam off</button>
+          <button data-post="moderation/camera-enable">restore cam</button>
+        </div>
+        <button data-post="moderation/screen-share-stop" class="full">stop screen share 🖥️</button>
+        <button data-post="moderation/kick" class="full danger">kick</button>
+
+        <h2>Recording</h2>
+        <div class="row">
+          <button data-post="recording/start">● start</button>
+          <button data-post="recording/stop">■ stop</button>
+        </div>
+        <h2>Transcription</h2>
+        <div class="row">
+          <button data-post="transcription/start">● start</button>
+          <button data-post="transcription/stop">■ stop</button>
+        </div>
+      </div>
+    </fieldset>
+
+    <div id="log"></div>
+  </aside>
+  <main>
+    <div id="recbar"></div>
+    <div id="tiles"></div>
+    <div id="feed"></div>
+    <div id="audio" style="display:none"></div>
+    <div id="openvisio-container"></div>
+  </main>
+
+  <script type="module">
+    // REVERT-WHEN-LIVEKIT-UPGRADED — pin to 1.15.10 because staging LiveKit < v1.7
+    // serves /rtc/validate, not /rtc/v1/validate. When staging is ≥ v1.7, swap to
+    // 'https://esm.sh/livekit-client@2.17.1' (or the current 2.x).
+    import { Room, RoomEvent } from 'https://esm.sh/livekit-client@1.15.10';
+
+    const $ = (id) => document.getElementById(id);
+    const log = (m) => { const el = $('log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+
+    // ── Runtime config (SDK CDN URL) ─────────────────────────────────────────────
+    // The backend tells us which @openvisio/sdk-js bundle to load — this proves the
+    // demo is using the *published* package on npm (via the esm.sh mirror).
+    const cfg = await fetch('/api/config').then((r) => r.json());
+    let OpenvisioBrowserCtor = null;
+    const loadOpenvisioBrowser = async () => {
+      if (OpenvisioBrowserCtor) return OpenvisioBrowserCtor;
+      log(`loading @openvisio/sdk-js from ${cfg.sdkBrowserUrl}`);
+      const mod = await import(cfg.sdkBrowserUrl);
+      OpenvisioBrowserCtor = mod.OpenvisioBrowser;
+      return OpenvisioBrowserCtor;
+    };
+    const post = (path, body) =>
+      fetch('/api/openvisio/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error); return j; });
+    const run = (label, p) => p.then((r) => log(`${label} → ${r.status ?? 'ok'}`)).catch((e) => log('ERROR: ' + e.message));
+
+    let session = null;     // { openvisioUrl, slug, roomName, userId, token, livekitUrl, role, username }
+    let room = null;
+    let openvisio = null;   // OpenvisioBrowser instance when in iframe mode
+    let iframeEl = null;    // mounted OpenVisio iframe element
+    const useIframe = () => $('useIframe').checked;
+    const actions = $('actions'), targetSel = $('target'), tiles = $('tiles');
+    const target = () => targetSel.value || session.userId;
+    // Optional display name — works even for guests (not logged in).
+    const dnQuery = () => { const v = $('displayName').value.trim(); return v ? '?displayName=' + encodeURIComponent(v) : ''; };
+
+    // ── Portal login (Keycloak Authorization Code + PKCE, real) ──────────────────
+    async function refreshMe() {
+      const { username } = await fetch('/api/portal/me').then((r) => r.json());
+      $('join').disabled = !username;
+      $('login').disabled = !!username;
+      $('logout').disabled = !username;
+      $('me').textContent = username
+        ? `logged in as ${username} — you can create rooms (admin) or join`
+        : 'not logged in — you can only join an existing room as guest';
+    }
+    $('login').onclick = () => { location.href = '/api/portal/login'; };
+    $('logout').onclick = () => { location.href = '/api/portal/logout'; };
+    refreshMe();
+
+    // ── LiveKit (headless) ───────────────────────────────────────────────────────
+    function tileFor(p) {
+      let el = $('tile-' + p.identity);
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'tile';
+        el.id = 'tile-' + p.identity;
+        el.innerHTML =
+          '<video autoplay playsinline></video>' +
+          '<div class="camoff">📷 camera off</div>' +
+          '<div class="badges"><span class="mic">🎤</span><span class="hand">✋</span></div>' +
+          '<span class="name"></span>';
+        tiles.appendChild(el);
+      }
+      el.querySelector('.name').textContent = (p.name || p.identity) + (p === room?.localParticipant ? ' (you)' : '');
+      return el;
+    }
+
+    // Reflect a participant's live state on their tile (mic / camera / raised hand).
+    function updateStatus(p) {
+      if (!p || !room) return;
+      const el = tileFor(p);
+      const micOn = p.isMicrophoneEnabled, camOn = p.isCameraEnabled;
+      const hand = !!(p.attributes && p.attributes.handRaisedAt);
+      const mic = el.querySelector('.mic');
+      mic.textContent = micOn ? '🎤' : '🔇';
+      mic.classList.toggle('muted', !micOn);
+      el.querySelector('.hand').style.display = hand ? '' : 'none';
+      el.querySelector('.camoff').style.display = camOn ? 'none' : 'flex';
+    }
+
+    // HTML-escape before inserting user text into the feed.
+    const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+    // Right-side scrolling feed of chat + raise-hand events (newest at the bottom).
+    function pushFeed(html, kind) {
+      const feed = $('feed');
+      const it = document.createElement('div');
+      it.className = 'item' + (kind ? ' ' + kind : '');
+      it.innerHTML = html;
+      feed.appendChild(it);
+      while (feed.children.length > 60) feed.firstChild.remove();
+      feed.scrollTop = feed.scrollHeight;
+    }
+
+    // Recording / transcription state lives in the LiveKit room metadata, set by the proxy
+    // (recording_mode + recording_status). Show a persistent indicator while active.
+    let recState = { recording: false, transcription: false };
+    function applyRecording() {
+      let meta = {};
+      try { meta = room?.metadata ? JSON.parse(room.metadata) : {}; } catch { /* not JSON */ }
+      const active = meta.recording_status === 'started';
+      const recording = active && meta.recording_mode === 'screen_recording';
+      const transcription = active && meta.recording_mode === 'transcript';
+      if (recording !== recState.recording)
+        pushFeed(recording ? '● <b>Recording</b> started' : '■ <b>Recording</b> stopped', recording ? 'rec' : '');
+      if (transcription !== recState.transcription)
+        pushFeed(transcription ? '📝 <b>Transcription</b> started' : '■ <b>Transcription</b> stopped', transcription ? 'rec' : '');
+      recState = { recording, transcription };
+      const bar = $('recbar');
+      bar.innerHTML =
+        (recording ? '<div class="pill"><span class="dot"></span>Recording</div>' : '') +
+        (transcription ? '<div class="pill transcript"><span class="dot"></span>Transcribing</div>' : '');
+    }
+    const removeTile = (p) => $('tile-' + p.identity)?.remove();
+
+    function attach(track, p) {
+      if (track.kind === 'video') {
+        const v = tileFor(p).querySelector('video');
+        track.attach(v);
+        // Mirror your own camera self-view (not screen share, not remote participants).
+        v.style.transform = (p === room.localParticipant && track.source === 'camera') ? 'scaleX(-1)' : '';
+      } else if (track.kind === 'audio' && p !== room.localParticipant) {
+        const a = document.createElement('audio'); a.autoplay = true; track.attach(a); $('audio').appendChild(a);
+      }
+    }
+
+    // REVERT-WHEN-LIVEKIT-UPGRADED — v1 exposes Room.participants, v2 renamed it to
+    // Room.remoteParticipants. The shim works for both; when we upgrade to 2.x, the
+    // shim still works but the two callsites below can be simplified to room.remoteParticipants.
+    const remoteParticipantsOf = (r) => r.remoteParticipants || r.participants;
+
+    function refreshTargets() {
+      if (!room) return;
+      const parts = [room.localParticipant, ...remoteParticipantsOf(room).values()];
+      const prev = targetSel.value || session.userId;
+      targetSel.innerHTML = parts.map((p) =>
+        `<option value="${p.identity}">${p.name || p.identity}${p === room.localParticipant ? ' (you)' : ''}</option>`).join('');
+      if (parts.some((p) => p.identity === prev)) targetSel.value = prev;
+    }
+    $('refresh').onclick = refreshTargets;
+
+    function showReaction(p, emoji) {
+      const el = tileFor(p);
+      const s = document.createElement('span'); s.className = 'react'; s.textContent = emojiOf(emoji);
+      el.appendChild(s); setTimeout(() => s.remove(), 1600);
+    }
+    const emojiOf = (id) => ({ 'thumbs-up':'👍','party-popper':'🎉','red-heart':'❤️','clapping-hands':'👏','folded-hands':'🙏' }[id] || '🎉');
+
+    async function connectLiveKit() {
+      room = new Room({ adaptiveStream: true, dynacast: true });
+      room
+        .on(RoomEvent.TrackSubscribed, (track, _pub, p) => { attach(track, p); updateStatus(p); refreshTargets(); })
+        .on(RoomEvent.TrackUnsubscribed, (track, _pub, p) => { track.detach(); updateStatus(p); })
+        .on(RoomEvent.LocalTrackPublished, (pub) => { attach(pub.track, room.localParticipant); updateStatus(room.localParticipant); })
+        .on(RoomEvent.LocalTrackUnpublished, () => updateStatus(room.localParticipant))
+        // Mic/camera mute & unmute — the visual feedback you asked for.
+        .on(RoomEvent.TrackMuted, (_pub, p) => { updateStatus(p); log(`${p.name || p.identity} muted ${_pub.source}`); })
+        .on(RoomEvent.TrackUnmuted, (_pub, p) => { updateStatus(p); log(`${p.name || p.identity} unmuted ${_pub.source}`); })
+        .on(RoomEvent.ParticipantConnected, (p) => { log(`joined: ${p.name || p.identity}`); tileFor(p); updateStatus(p); refreshTargets(); })
+        .on(RoomEvent.ParticipantDisconnected, (p) => { log(`left: ${p.name || p.identity}`); removeTile(p); refreshTargets(); })
+        // Raise / lower hand (proxy sets the handRaisedAt attribute).
+        .on(RoomEvent.ParticipantAttributesChanged, (changed, p) => {
+          if ('handRaisedAt' in changed) {
+            const who = p.name || p.identity;
+            if (changed.handRaisedAt) { log(`${who} raised ✋`); pushFeed('✋ <b>' + esc(who) + '</b> raised their hand', 'hand'); }
+            else { log(`${who} lowered their hand`); pushFeed('<b>' + esc(who) + '</b> lowered their hand'); }
+          }
+          updateStatus(p);
+        })
+        // Highlight whoever is speaking.
+        .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+          const ids = new Set(speakers.map((s) => s.identity));
+          for (const p of [room.localParticipant, ...remoteParticipantsOf(room).values()])
+            tileFor(p).classList.toggle('speaking', ids.has(p.identity));
+        })
+        .on(RoomEvent.DataReceived, (payload, p) => {
+          try {
+            const m = JSON.parse(new TextDecoder().decode(payload));
+            if (m.type === 'reactionReceived') showReaction(p || room.localParticipant, m.data?.emoji);
+            else if (m.message) { const who = p?.name || p?.identity || 'system'; log(`chat from ${who}: ${m.message}`); pushFeed('<b>' + esc(who) + ':</b> ' + esc(m.message)); }
+          } catch { /* ignore non-JSON */ }
+        })
+        // Recording / transcription started or stopped (proxy updates room metadata).
+        .on(RoomEvent.RoomMetadataChanged, () => applyRecording())
+        .on(RoomEvent.Disconnected, () => { tiles.innerHTML = ''; $('audio').innerHTML = ''; $('recbar').innerHTML = ''; recState = { recording: false, transcription: false }; });
+
+      await room.connect(session.livekitUrl, session.token);
+      tileFor(room.localParticipant);
+      await room.localParticipant.enableCameraAndMicrophone();
+      updateStatus(room.localParticipant);
+      log(`connected to LiveKit as ${room.localParticipant.identity}`);
+      refreshTargets();
+      applyRecording();   // reflect any recording/transcription already in progress
+    }
+
+    function onJoined() {
+      const r = $('role');
+      r.textContent = session.role === 'admin'
+        ? '● admin — you can administer this room (OpenVisio room role)'
+        : '● guest — moderation/recording hidden & blocked server-side (403)';
+      r.className = session.role; r.style.display = 'block';
+      $('admin-actions').style.display = session.role === 'admin' ? '' : 'none';
+      actions.disabled = false;
+    }
+
+    // ── Iframe mode — uses OpenvisioBrowser from the published @openvisio/sdk-js ──
+    // Demonstrates that the npm-published browser bundle loads from CDN, instantiates,
+    // and mounts an OpenVisio iframe with the proxy-minted access token.
+    async function connectViaIframe() {
+      const Ctor = await loadOpenvisioBrowser();
+      openvisio = new Ctor({ openvisioUrl: session.openvisioUrl });
+      // Best-effort SSO popup — may fail if OpenVisio/Keycloak isn't reachable from this host.
+      try { await openvisio.authenticate(); } catch (e) { log('authenticate() warning: ' + e.message); }
+      // Hide the headless tile grid and show the iframe container.
+      $('tiles').style.display = 'none';
+      $('openvisio-container').style.display = 'block';
+      iframeEl = openvisio.mountIframe($('openvisio-container'), {
+        slug: session.slug,
+        accessToken: session.token,
+      });
+      log(`mounted OpenVisio iframe via OpenvisioBrowser (${cfg.sdkBrowserUrl})`);
+    }
+
+    // (1) Host — create (login required), then connect via the chosen mode.
+    $('join').onclick = async () => {
+      try {
+        session = await fetch('/api/openvisio/bootstrap' + dnQuery()).then((r) => r.json());
+        log(`room ${session.slug} — role ${session.role}, you are ${session.userId}`);
+        if (useIframe()) await connectViaIframe();
+        else await connectLiveKit();
+        onJoined();
+      } catch (e) { log('ERROR: ' + e.message); }
+    };
+
+    // (2) Guest — resolve, then connect via the chosen mode. Admin only if owner.
+    $('joinExisting').onclick = async () => {
+      try {
+        const raw = $('slug').value.trim();
+        if (!raw) return log('enter a slug or OpenVisio URL first');
+        const slug = raw.includes('/') ? new URL(raw).pathname.split('/').filter(Boolean).pop() : raw;
+        const bearer = $('bearer').value.trim();
+        session = await fetch('/api/openvisio/resolve/' + encodeURIComponent(slug) + dnQuery(), {
+          headers: bearer ? { Authorization: 'Bearer ' + bearer } : {},
+        }).then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error); return j; });
+        log(`resolved ${session.slug} — role ${session.role}, you are ${session.userId}`);
+        if (useIframe()) await connectViaIframe();
+        else await connectLiveKit();
+        onJoined();
+      } catch (e) { log('ERROR: ' + e.message); }
+    };
+
+    // ── My devices — client-side, the headless advantage (no proxy needed) ───────
+    $('myMic').onclick = async () => {
+      const on = room.localParticipant.isMicrophoneEnabled;
+      await room.localParticipant.setMicrophoneEnabled(!on);
+      $('myMic').textContent = on ? 'unmute me' : 'mute me';
+      updateStatus(room.localParticipant);
+    };
+    $('myCam').onclick = async () => {
+      const on = room.localParticipant.isCameraEnabled;
+      await room.localParticipant.setCameraEnabled(!on);
+      $('myCam').textContent = on ? 'cam on' : 'cam off';
+      updateStatus(room.localParticipant);
+    };
+    $('myShare').onclick = async () => {
+      const on = room.localParticipant.isScreenShareEnabled;
+      await room.localParticipant.setScreenShareEnabled(!on);
+      $('myShare').textContent = on ? 'share screen' : 'stop sharing';
+    };
+    // Client-side reaction — animates on every client (the proxy toast can't do this).
+    // Uses the livekit-client v2.x publishData signature ({ reliable: true }).
+    // Against staging (v1.x client pinned above), this throws "invalid int 32" — the
+    // local emoji animation still plays via showReaction, but the reaction is NOT
+    // broadcast to other participants. Will work cleanly once staging is upgraded.
+    const sendReaction = (emoji) => {
+      const payload = new TextEncoder().encode(JSON.stringify({ type: 'reactionReceived', data: { emoji } }));
+      room.localParticipant.publishData(payload, { reliable: true });
+      showReaction(room.localParticipant, emoji);
+    };
+    $('myReactPartyPopper').onclick  = () => sendReaction('party-popper');
+    $('myReactThumbsUp').onclick     = () => sendReaction('thumbs-up');
+    $('myReactRedHeart').onclick     = () => sendReaction('red-heart');
+    $('myReactClappingHands').onclick = () => sendReaction('clapping-hands');
+    $('myReactFoldedHands').onclick  = () => sendReaction('folded-hands');
+
+    // ── Proxy actions on the target participant ──────────────────────────────────
+    for (const btn of document.querySelectorAll('button[data-post]')) {
+      btn.onclick = () => run(btn.dataset.post, post(btn.dataset.post, { userId: target() }));
+    }
+    $('chat').onclick = () => run('chat', post('interactions/chat', { message: $('msg').value }));
+    // Participant requests to the host — surfaced as a chat message everyone (incl. host) sees.
+    $('interactions/request-recording').onclick = () =>
+      run('request-recording', post('interactions/chat', { message: '✋ requests the host to start recording' }));
+    $('interactions/request-transcription').onclick = () =>
+      run('request-transcription', post('interactions/chat', { message: '✋ requests the host to start transcription' }));
+    let handRaised = false;
+    $('hand').onclick = () => {
+      handRaised = !handRaised;
+      $('hand').textContent = handRaised ? 'lower hand 🤚' : 'raise hand ✋';
+      run('raise-hand', post('interactions/raise-hand', { userId: target(), raised: handRaised }));
+    };
+    $('copyLink').onclick = async () => {
+      const link = `${session.openvisioUrl}/${session.slug}`;
+      try { await navigator.clipboard.writeText(link); log('copied invite link: ' + link); }
+      catch { log('copy failed — link: ' + link); }
+    };
+    $('leave').onclick = async () => {
+      // Iframe mode: destroy the iframe FIRST (no "excluded by an administrator" banner),
+      // then notify the backend for server-side cleanup. Headless mode: just disconnect.
+      if (openvisio && iframeEl) {
+        openvisio.leave(iframeEl);
+        iframeEl = null;
+        $('openvisio-container').style.display = 'none';
+        $('tiles').style.display = '';
+      } else {
+        await room?.disconnect();                  // clean client-initiated disconnect
+      }
+      await run('leave', post('leave', { userId: session.userId }));
+      actions.disabled = true; $('role').style.display = 'none';
+    };
+  </script>
+</body>
+</html>
