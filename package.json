@@ -1,14 +1,14 @@
 {
-  "name": "openvisio-sdk-js-sample",
-  "version": "2.0.1",
+  "name": "e2e",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Official sample app for @openvisio/sdk-js — backend integration plus headless and iframe frontend flows against the OpenVisio proxy.",
+  "description": "Throwaway end-to-end demo of @openvisio/sdk-js against the staging api.",
   "scripts": {
     "start": "node server.mjs"
   },
   "dependencies": {
-    "@openvisio/sdk-js": "^2.0.0",
+    "@openvisio/sdk-js": "^2.0.1",
     "express": "^4.19.2"
   }
 }
