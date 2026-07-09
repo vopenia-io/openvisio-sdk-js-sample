@@ -176,20 +176,20 @@
     const $ = (id) => document.getElementById(id);
     const log = (m) => { const el = $('log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
 
-    // ── Runtime config (SDK CDN URL) ─────────────────────────────────────────────
-    // The backend tells us which @openvisio/sdk-js bundle to load — this proves the
-    // demo is using the *published* package on npm (via the esm.sh mirror).
-    const cfg = await fetch('/api/config').then((r) => r.json());
+    // ── @openvisio/sdk-js browser bundle (loaded from the published npm package) ──
+    // The iframe mode uses the real OpenvisioBrowser client from the CDN mirror,
+    // proving the demo integrates the published package, not a local copy.
+    const SDK_BROWSER_URL = 'https://esm.sh/@openvisio/sdk-js@2.0.1/browser';
     let OpenvisioBrowserCtor = null;
     const loadOpenvisioBrowser = async () => {
       if (OpenvisioBrowserCtor) return OpenvisioBrowserCtor;
-      log(`loading @openvisio/sdk-js from ${cfg.sdkBrowserUrl}`);
-      const mod = await import(cfg.sdkBrowserUrl);
+      log(`loading @openvisio/sdk-js from ${SDK_BROWSER_URL}`);
+      const mod = await import(SDK_BROWSER_URL);
       OpenvisioBrowserCtor = mod.OpenvisioBrowser;
       return OpenvisioBrowserCtor;
     };
     const post = (path, body) =>
-      fetch('/api/openvisio/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      fetch('/api/meet/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
         .then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error); return j; });
     const run = (label, p) => p.then((r) => log(`${label} → ${r.status ?? 'ok'}`)).catch((e) => log('ERROR: ' + e.message));
 
@@ -378,7 +378,7 @@
     // and mounts an OpenVisio iframe with the proxy-minted access token.
     async function connectViaIframe() {
       const Ctor = await loadOpenvisioBrowser();
-      openvisio = new Ctor({ openvisioUrl: session.openvisioUrl });
+      openvisio = new Ctor({ openvisioUrl: session.meetUrl });
       // Best-effort SSO popup — may fail if OpenVisio/Keycloak isn't reachable from this host.
       try { await openvisio.authenticate(); } catch (e) { log('authenticate() warning: ' + e.message); }
       // Hide the headless tile grid and show the iframe container.
@@ -388,13 +388,13 @@
         slug: session.slug,
         accessToken: session.token,
       });
-      log(`mounted OpenVisio iframe via OpenvisioBrowser (${cfg.sdkBrowserUrl})`);
+      log(`mounted OpenVisio iframe via OpenvisioBrowser (${SDK_BROWSER_URL})`);
     }
 
     // (1) Host — create (login required), then connect via the chosen mode.
     $('join').onclick = async () => {
       try {
-        session = await fetch('/api/openvisio/bootstrap' + dnQuery()).then((r) => r.json());
+        session = await fetch('/api/meet/bootstrap' + dnQuery()).then((r) => r.json());
         log(`room ${session.slug} — role ${session.role}, you are ${session.userId}`);
         if (useIframe()) await connectViaIframe();
         else await connectLiveKit();
@@ -409,7 +409,7 @@
         if (!raw) return log('enter a slug or OpenVisio URL first');
         const slug = raw.includes('/') ? new URL(raw).pathname.split('/').filter(Boolean).pop() : raw;
         const bearer = $('bearer').value.trim();
-        session = await fetch('/api/openvisio/resolve/' + encodeURIComponent(slug) + dnQuery(), {
+        session = await fetch('/api/meet/resolve/' + encodeURIComponent(slug) + dnQuery(), {
           headers: bearer ? { Authorization: 'Bearer ' + bearer } : {},
         }).then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error); return j; });
         log(`resolved ${session.slug} — role ${session.role}, you are ${session.userId}`);
@@ -470,7 +470,7 @@
       run('raise-hand', post('interactions/raise-hand', { userId: target(), raised: handRaised }));
     };
     $('copyLink').onclick = async () => {
-      const link = `${session.openvisioUrl}/${session.slug}`;
+      const link = `${session.meetUrl}/${session.slug}`;
       try { await navigator.clipboard.writeText(link); log('copied invite link: ' + link); }
       catch { log('copy failed — link: ' + link); }
     };
