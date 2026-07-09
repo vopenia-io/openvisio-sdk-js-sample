@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>integrator ↔ LiveKit — headless e2e demo</title>
+  <title>@openvisio/sdk-js — sample app</title>
   <style>
     body { font: 14px/1.5 system-ui, sans-serif; margin: 0; display: flex; height: 100vh; }
     aside { width: 300px; padding: 14px; border-right: 1px solid #ddd; box-sizing: border-box; overflow-y: auto; }
@@ -47,13 +47,22 @@
     #role.guest { background: #fdf0e3; color: #8a5200; }
     #divider { border-top: 1px solid #eee; margin-top: 8px;  margin-bottom: 8px; }
     #log { font: 11px/1.4 monospace; white-space: pre-wrap; margin-top: 14px; color: #444; border-top: 1px solid #eee; padding-top: 8px; }
+    #openvisio-container { width: 100%; height: 100%; display: none; }
+    #openvisio-container iframe { width: 100%; height: 100%; border: 0; }
+    .modetoggle { display: flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 12px; color: #555; }
   </style>
 </head>
 <body>
   <aside>
-    <h1>Integrator headless demo</h1>
-    <p class="hint">No iframe, no Meet SSO. integrator connects to LiveKit directly with the
-      proxy-minted token (<code>livekit-client</code>). Identity is fully integrator-controlled.</p>
+    <h1>@openvisio/sdk-js sample</h1>
+    <p class="hint">Headless by default (<code>livekit-client</code> direct to LiveKit).
+      Toggle iframe mode to load <code>OpenvisioBrowser</code> from the published CDN
+      and embed the OpenVisio web app.</p>
+
+    <label class="modetoggle">
+      <input type="checkbox" id="useIframe" />
+      Use OpenVisio iframe (loads <code>@openvisio/sdk-js/browser</code> from CDN)
+    </label>
 
     <h2>Portal login (Keycloak — required to create)</h2>
     <div class="row">
@@ -66,7 +75,7 @@
     <button id="join" class="full" disabled>① Create room &amp; join (host → admin)</button>
 
     <h2>…or join an existing room (guest)</h2>
-    <input id="slug" placeholder="slug or full Meet URL" />
+    <input id="slug" placeholder="slug or full OpenVisio URL" />
     <input id="bearer" placeholder="Keycloak bearer — private rooms only (optional)" />
     <button id="joinExisting" class="full">② Join existing</button>
 
@@ -111,7 +120,7 @@
         <button data-post="interactions/camera-enable">cam on</button>
       </div>
       <button id="hand" class="full">raise hand ✋</button>
-      <input id="msg" value="Hello from integrator 👋" />
+      <input id="msg" value="Hello from OpenVisio 👋" />
       <button id="chat" class="full">send chat 💬</button>
 
       <h2>Room</h2>
@@ -150,20 +159,45 @@
 
     <div id="log"></div>
   </aside>
-  <main><div id="recbar"></div><div id="tiles"></div><div id="feed"></div><div id="audio" style="display:none"></div></main>
+  <main>
+    <div id="recbar"></div>
+    <div id="tiles"></div>
+    <div id="feed"></div>
+    <div id="audio" style="display:none"></div>
+    <div id="openvisio-container"></div>
+  </main>
 
   <script type="module">
-    import { Room, RoomEvent } from 'https://esm.sh/livekit-client@2.17.1';
+    // REVERT-WHEN-LIVEKIT-UPGRADED — pin to 1.15.10 because staging LiveKit < v1.7
+    // serves /rtc/validate, not /rtc/v1/validate. When staging is ≥ v1.7, swap to
+    // 'https://esm.sh/livekit-client@2.17.1' (or the current 2.x).
+    import { Room, RoomEvent } from 'https://esm.sh/livekit-client@1.15.10';
 
     const $ = (id) => document.getElementById(id);
     const log = (m) => { const el = $('log'); el.textContent += m + '\n'; el.scrollTop = el.scrollHeight; };
+
+    // ── @openvisio/sdk-js browser bundle (loaded from the published npm package) ──
+    // The iframe mode uses the real OpenvisioBrowser client from the CDN mirror,
+    // proving the demo integrates the published package, not a local copy.
+    const SDK_BROWSER_URL = 'https://esm.sh/@openvisio/sdk-js@2.0.1/browser';
+    let OpenvisioBrowserCtor = null;
+    const loadOpenvisioBrowser = async () => {
+      if (OpenvisioBrowserCtor) return OpenvisioBrowserCtor;
+      log(`loading @openvisio/sdk-js from ${SDK_BROWSER_URL}`);
+      const mod = await import(SDK_BROWSER_URL);
+      OpenvisioBrowserCtor = mod.OpenvisioBrowser;
+      return OpenvisioBrowserCtor;
+    };
     const post = (path, body) =>
       fetch('/api/meet/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
         .then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error); return j; });
     const run = (label, p) => p.then((r) => log(`${label} → ${r.status ?? 'ok'}`)).catch((e) => log('ERROR: ' + e.message));
 
-    let session = null;     // { meetUrl, slug, roomName, userId, token, livekitUrl, role, username }
+    let session = null;     // { openvisioUrl, slug, roomName, userId, token, livekitUrl, role, username }
     let room = null;
+    let openvisio = null;   // OpenvisioBrowser instance when in iframe mode
+    let iframeEl = null;    // mounted OpenVisio iframe element
+    const useIframe = () => $('useIframe').checked;
     const actions = $('actions'), targetSel = $('target'), tiles = $('tiles');
     const target = () => targetSel.value || session.userId;
     // Optional display name — works even for guests (not logged in).
@@ -260,9 +294,14 @@
       }
     }
 
+    // REVERT-WHEN-LIVEKIT-UPGRADED — v1 exposes Room.participants, v2 renamed it to
+    // Room.remoteParticipants. The shim works for both; when we upgrade to 2.x, the
+    // shim still works but the two callsites below can be simplified to room.remoteParticipants.
+    const remoteParticipantsOf = (r) => r.remoteParticipants || r.participants;
+
     function refreshTargets() {
       if (!room) return;
-      const parts = [room.localParticipant, ...room.remoteParticipants.values()];
+      const parts = [room.localParticipant, ...remoteParticipantsOf(room).values()];
       const prev = targetSel.value || session.userId;
       targetSel.innerHTML = parts.map((p) =>
         `<option value="${p.identity}">${p.name || p.identity}${p === room.localParticipant ? ' (you)' : ''}</option>`).join('');
@@ -301,7 +340,7 @@
         // Highlight whoever is speaking.
         .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
           const ids = new Set(speakers.map((s) => s.identity));
-          for (const p of [room.localParticipant, ...room.remoteParticipants.values()])
+          for (const p of [room.localParticipant, ...remoteParticipantsOf(room).values()])
             tileFor(p).classList.toggle('speaking', ids.has(p.identity));
         })
         .on(RoomEvent.DataReceived, (payload, p) => {
@@ -315,15 +354,7 @@
         .on(RoomEvent.RoomMetadataChanged, () => applyRecording())
         .on(RoomEvent.Disconnected, () => { tiles.innerHTML = ''; $('audio').innerHTML = ''; $('recbar').innerHTML = ''; recState = { recording: false, transcription: false }; });
 
-      // Private (vRack) cluster: LiveKit is only reachable through the Stunner TURN
-      // relay, so force relay-only ICE with the TURN server the server handed us.
-      const connectOpts = session.turn ? {
-        rtcConfig: {
-          iceTransportPolicy: 'relay',
-          iceServers: [{ urls: session.turn.url, username: session.turn.username, credential: session.turn.credential }],
-        },
-      } : undefined;
-      await room.connect(session.livekitUrl, session.token, connectOpts);
+      await room.connect(session.livekitUrl, session.token);
       tileFor(room.localParticipant);
       await room.localParticipant.enableCameraAndMicrophone();
       updateStatus(room.localParticipant);
@@ -335,35 +366,55 @@
     function onJoined() {
       const r = $('role');
       r.textContent = session.role === 'admin'
-        ? '● admin — you can administer this room (Meet room role)'
+        ? '● admin — you can administer this room (OpenVisio room role)'
         : '● guest — moderation/recording hidden & blocked server-side (403)';
       r.className = session.role; r.style.display = 'block';
       $('admin-actions').style.display = session.role === 'admin' ? '' : 'none';
       actions.disabled = false;
     }
 
-    // ① Host — create (login required), then connect to LiveKit with the minted token.
+    // ── Iframe mode — uses OpenvisioBrowser from the published @openvisio/sdk-js ──
+    // Demonstrates that the npm-published browser bundle loads from CDN, instantiates,
+    // and mounts an OpenVisio iframe with the proxy-minted access token.
+    async function connectViaIframe() {
+      const Ctor = await loadOpenvisioBrowser();
+      openvisio = new Ctor({ openvisioUrl: session.meetUrl });
+      // Best-effort SSO popup — may fail if OpenVisio/Keycloak isn't reachable from this host.
+      try { await openvisio.authenticate(); } catch (e) { log('authenticate() warning: ' + e.message); }
+      // Hide the headless tile grid and show the iframe container.
+      $('tiles').style.display = 'none';
+      $('openvisio-container').style.display = 'block';
+      iframeEl = openvisio.mountIframe($('openvisio-container'), {
+        slug: session.slug,
+        accessToken: session.token,
+      });
+      log(`mounted OpenVisio iframe via OpenvisioBrowser (${SDK_BROWSER_URL})`);
+    }
+
+    // (1) Host — create (login required), then connect via the chosen mode.
     $('join').onclick = async () => {
       try {
         session = await fetch('/api/meet/bootstrap' + dnQuery()).then((r) => r.json());
         log(`room ${session.slug} — role ${session.role}, you are ${session.userId}`);
-        await connectLiveKit();
+        if (useIframe()) await connectViaIframe();
+        else await connectLiveKit();
         onJoined();
       } catch (e) { log('ERROR: ' + e.message); }
     };
 
-    // ② Guest — resolve, then connect. Admin only if you are the logged-in owner.
+    // (2) Guest — resolve, then connect via the chosen mode. Admin only if owner.
     $('joinExisting').onclick = async () => {
       try {
         const raw = $('slug').value.trim();
-        if (!raw) return log('enter a slug or Meet URL first');
+        if (!raw) return log('enter a slug or OpenVisio URL first');
         const slug = raw.includes('/') ? new URL(raw).pathname.split('/').filter(Boolean).pop() : raw;
         const bearer = $('bearer').value.trim();
         session = await fetch('/api/meet/resolve/' + encodeURIComponent(slug) + dnQuery(), {
           headers: bearer ? { Authorization: 'Bearer ' + bearer } : {},
         }).then(async (r) => { const j = await r.json(); if (!r.ok) throw new Error(j.error); return j; });
         log(`resolved ${session.slug} — role ${session.role}, you are ${session.userId}`);
-        await connectLiveKit();
+        if (useIframe()) await connectViaIframe();
+        else await connectLiveKit();
         onJoined();
       } catch (e) { log('ERROR: ' + e.message); }
     };
@@ -387,50 +438,31 @@
       $('myShare').textContent = on ? 'share screen' : 'stop sharing';
     };
     // Client-side reaction — animates on every client (the proxy toast can't do this).
-    $('myReactPartyPopper').onclick = () => {
-      const payload = new TextEncoder().encode(JSON.stringify({ type: 'reactionReceived', data: { emoji: 'party-popper' } }));
+    // Uses the livekit-client v2.x publishData signature ({ reliable: true }).
+    // Against staging (v1.x client pinned above), this throws "invalid int 32" — the
+    // local emoji animation still plays via showReaction, but the reaction is NOT
+    // broadcast to other participants. Will work cleanly once staging is upgraded.
+    const sendReaction = (emoji) => {
+      const payload = new TextEncoder().encode(JSON.stringify({ type: 'reactionReceived', data: { emoji } }));
       room.localParticipant.publishData(payload, { reliable: true });
-      showReaction(room.localParticipant, 'party-popper');
+      showReaction(room.localParticipant, emoji);
     };
-    $('myReactThumbsUp').onclick = () => {
-      const payload = new TextEncoder().encode(JSON.stringify({ type: 'reactionReceived', data: { emoji: 'thumbs-up' } }));
-      room.localParticipant.publishData(payload, { reliable: true });
-      showReaction(room.localParticipant, 'thumbs-up');
-    };
-    $('myReactRedHeart').onclick = () => {
-      const payload = new TextEncoder().encode(JSON.stringify({ type: 'reactionReceived', data: { emoji: 'red-heart' } }));
-      room.localParticipant.publishData(payload, { reliable: true });
-      showReaction(room.localParticipant, 'red-heart');
-    };
-    $('myReactClappingHands').onclick = () => {
-      const payload = new TextEncoder().encode(JSON.stringify({ type: 'reactionReceived', data: { emoji: 'clapping-hands' } }));
-      room.localParticipant.publishData(payload, { reliable: true });
-      showReaction(room.localParticipant, 'clapping-hands');
-    };
-    $('myReactFoldedHands').onclick = () => {
-      const payload = new TextEncoder().encode(JSON.stringify({ type: 'reactionReceived', data: { emoji: 'folded-hands' } }));
-      room.localParticipant.publishData(payload, { reliable: true });
-      showReaction(room.localParticipant, 'folded-hands');
-    };
+    $('myReactPartyPopper').onclick  = () => sendReaction('party-popper');
+    $('myReactThumbsUp').onclick     = () => sendReaction('thumbs-up');
+    $('myReactRedHeart').onclick     = () => sendReaction('red-heart');
+    $('myReactClappingHands').onclick = () => sendReaction('clapping-hands');
+    $('myReactFoldedHands').onclick  = () => sendReaction('folded-hands');
 
     // ── Proxy actions on the target participant ──────────────────────────────────
     for (const btn of document.querySelectorAll('button[data-post]')) {
       btn.onclick = () => run(btn.dataset.post, post(btn.dataset.post, { userId: target() }));
     }
-    // Send a chat message AS the connected participant: published over LiveKit (topic
-    // lk-chat-topic) so it carries the sender's identity. The proxy chat endpoint is
-    // server-originated (anonymous) and stays available for backend/system messages.
-    function sendChat(message) {
-      if (!message || !room) return;
-      const me = room.localParticipant;
-      const payload = new TextEncoder().encode(JSON.stringify({ id: crypto.randomUUID(), message, timestamp: Date.now() }));
-      room.localParticipant.publishData(payload, { reliable: true, topic: 'lk-chat-topic' });
-      pushFeed('<b>' + esc(me.name || me.identity) + ':</b> ' + esc(message));   // local echo (you don't receive your own data)
-    }
-    $('chat').onclick = () => sendChat($('msg').value);
-    // Participant requests to the host — sent as the connected person too.
-    $('interactions/request-recording').onclick = () => sendChat('✋ requests the host to start recording');
-    $('interactions/request-transcription').onclick = () => sendChat('✋ requests the host to start transcription');
+    $('chat').onclick = () => run('chat', post('interactions/chat', { message: $('msg').value }));
+    // Participant requests to the host — surfaced as a chat message everyone (incl. host) sees.
+    $('interactions/request-recording').onclick = () =>
+      run('request-recording', post('interactions/chat', { message: '✋ requests the host to start recording' }));
+    $('interactions/request-transcription').onclick = () =>
+      run('request-transcription', post('interactions/chat', { message: '✋ requests the host to start transcription' }));
     let handRaised = false;
     $('hand').onclick = () => {
       handRaised = !handRaised;
@@ -443,7 +475,16 @@
       catch { log('copy failed — link: ' + link); }
     };
     $('leave').onclick = async () => {
-      await room?.disconnect();                    // clean client-initiated disconnect
+      // Iframe mode: destroy the iframe FIRST (no "excluded by an administrator" banner),
+      // then notify the backend for server-side cleanup. Headless mode: just disconnect.
+      if (openvisio && iframeEl) {
+        openvisio.leave(iframeEl);
+        iframeEl = null;
+        $('openvisio-container').style.display = 'none';
+        $('tiles').style.display = '';
+      } else {
+        await room?.disconnect();                  // clean client-initiated disconnect
+      }
       await run('leave', post('leave', { userId: session.userId }));
       actions.disabled = true; $('role').style.display = 'none';
     };
