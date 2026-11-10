@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Visio guest check</title>
+<style>
+  :root { color-scheme: light dark; --ok: #15803d; --ko: #b91c1c; --wait: #a16207; --line: #8884; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0 auto; max-width: 960px; padding: 16px; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  h2 { font-size: 15px; margin: 20px 0 8px; }
+  form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  input[type=text] { font: inherit; padding: 6px 8px; flex: 1 1 220px; min-width: 0; }
+  select { font: inherit; padding: 6px 8px; max-width: 100%; }
+  button { font: inherit; padding: 6px 12px; }
+  label { white-space: nowrap; }
+  #status { margin: 12px 0; font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { border-bottom: 1px solid var(--line); padding: 4px 8px; text-align: left; }
+  .scroll { overflow-x: auto; }
+  .ok { color: var(--ok); font-weight: 600; }
+  .ko { color: var(--ko); font-weight: 600; }
+  .wait { color: var(--wait); font-weight: 600; }
+  #tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+  .tile { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .tile video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; object-fit: contain; }
+  .tile p { margin: 0; padding: 4px 8px; font-size: 13px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1>Visio guest check</h1>
+
+<form id="form">
+  <select id="platform" aria-label="Platform">
+    <option value="">Detect from the URL</option>
+  </select>
+  <input id="room" type="text" required placeholder="Full room URL" aria-label="Room URL">
+  <input id="name" type="text" required value="Test Mago" aria-label="Display name">
+  <label><input id="synth" type="checkbox"> Test source (pattern + beep)</label>
+  <button id="join" type="submit">Join</button>
+  <button id="leave" type="button" hidden>Leave</button>
+  <button id="sound" type="button" hidden>Enable sound</button>
+  <button id="mic" type="button" hidden>Mute</button>
+  <button id="hand" type="button" hidden>Raise hand</button>
+</form>
+
+<p id="status" role="status">Not connected.</p>
+
+<h2>Audio and video</h2>
+<div class="scroll">
+  <table>
+    <thead><tr><th>Direction</th><th>Participant</th><th>Track</th><th>Bitrate</th><th>Audio level</th><th>Result</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="6">No track yet.</td></tr></tbody>
+  </table>
+</div>
+
+<h2>Video</h2>
+<div id="tiles"></div>
+<div id="audio" hidden></div>
+
+<h2>Events</h2>
+<ol id="events"></ol>
+
+<script type="module">
+  import { Room, RoomEvent, Track } from 'https://esm.sh/livekit-client@2.17.1';
+
+  const $ = (id) => document.getElementById(id);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  $('room').value = new URLSearchParams(location.search).get('room') ?? '';
+
+  // Platforms of the catalog. With one chosen, a slug is enough.
+  const roomHint = () => {
+    const key = $('platform').value;
+    $('room').placeholder = key ? 'Room slug, e.g. abc-defg-hij, or its full URL' : 'Full room URL';
+    $('room').setAttribute('aria-label', key ? 'Room slug or URL' : 'Room URL');
+  };
+  $('platform').addEventListener('change', roomHint);
+  fetch('/api/guest/platforms')
+    .then((r) => (r.ok ? r.json() : { platforms: [] }))
+    .then(({ platforms, preselected }) => {
+      for (const { key, displayName } of platforms) $('platform').add(new Option(`${displayName} (${key})`, key));
+      // The first allowed platform by default; `?platform=` picks another one, or detects from the URL when empty.
+      const params = new URLSearchParams(location.search);
+      const wanted = params.has('platform') ? params.get('platform') : (preselected ?? '');
+      if (wanted === '' || platforms.some((p) => p.key === wanted)) $('platform').value = wanted;
+      roomHint();
+    })
+    .catch(() => {});
+  if (new URLSearchParams(location.search).has('synth')) $('synth').checked = true;
+
+  let room = null;
+  let stopSynth = null;
+  let cancelled = false;
+  let statsTimer = null;
+  const previous = new Map(); // track sid → { bytes, at }
+  let lastRows = [];
+  let entryId = null;
+  let events = [];
+  let handRaised = false;
+  // True while this page acts, to tell its own changes from what the host does.
+  let selfMuting = false;
+  let selfHand = false;
+
+  function logEvent(text) {
+    const line = `${new Date().toLocaleTimeString()} ${text}`;
+    events.push(line);
+    $('events').prepend(Object.assign(document.createElement('li'), { textContent: line }));
+  }
+
+  const micMuted = () => room?.localParticipant.getTrackPublication(Track.Source.Microphone)?.isMuted ?? null;
+
+  function updateControls() {
+    $('mic').textContent = micMuted() ? 'Unmute' : 'Mute';
+    $('hand').textContent = handRaised ? 'Lower hand' : 'Raise hand';
+  }
+
+  const setStatus = (text, cls = '') => { $('status').textContent = text; $('status').className = cls; };
+
+  async function post(path, body) {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw Object.assign(new Error(data.error), data);
+    return data;
+  }
+
+  // ── Test source: a moving pattern and a short quiet beep every second ─────────
+  function createSynth() {
+    const canvas = Object.assign(document.createElement('canvas'), { width: 640, height: 360 });
+    const ctx = canvas.getContext('2d');
+    const draw = setInterval(() => {
+      const t = Date.now() / 1000;
+      ctx.fillStyle = '#1e3a8a';
+      ctx.fillRect(0, 0, 640, 360);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(((t * 120) % 680) - 40, 120, 40, 120);
+      ctx.font = '32px sans-serif';
+      ctx.fillText(new Date().toLocaleTimeString(), 20, 50);
+    }, 66);
+
+    const audio = new AudioContext();
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    const output = audio.createMediaStreamDestination();
+    oscillator.frequency.value = 440;
+    gain.gain.value = 0;
+    oscillator.connect(gain).connect(output);
+    oscillator.start();
+    audio.resume();
+    const beep = setInterval(() => {
+      const now = audio.currentTime;
+      gain.gain.setValueAtTime(0.1, now);
+      gain.gain.setValueAtTime(0, now + 0.2);
+    }, 1000);
+
+    return {
+      video: canvas.captureStream(15).getVideoTracks()[0],
+      audio: output.stream.getAudioTracks()[0],
+      stop() {
+        clearInterval(draw);
+        clearInterval(beep);
+        audio.close();
+      },
+    };
+  }
+
+  // ── Display ───────────────────────────────────────────────────────────────────
+  const tileId = (participant, track) => `tile-${participant.sid}-${track.sid ?? track.mediaStreamID}`;
+
+  function attach(track, participant) {
+    if (track.kind === Track.Kind.Audio) {
+      if (!participant.isLocal) $('audio').append(track.attach());
+      return;
+    }
+    const id = tileId(participant, track);
+    if ($(id)) return;
+    const tile = Object.assign(document.createElement('div'), { id, className: 'tile' });
+    const label = document.createElement('p');
+    label.textContent = participant.isLocal ? 'You' : participant.name || participant.identity;
+    tile.append(track.attach(), label);
+    $('tiles').append(tile);
+  }
+
+  function detach(track, participant) {
+    track.detach().forEach((element) => element.remove());
+    $(tileId(participant, track))?.remove();
+  }
+
+  /** Read bytes and audio level from WebRTC, which show what really goes through. */
+  async function measure(publication, participant) {
+    const track = publication.track;
+    if (!track) return null;
+    const local = participant.isLocal;
+    const report = await track.getRTCStatsReport();
+    let bytes = 0;
+    let level = null;
+    report?.forEach((stat) => {
+      if (stat.type === (local ? 'outbound-rtp' : 'inbound-rtp')) {
+        bytes += (local ? stat.bytesSent : stat.bytesReceived) ?? 0;
+        if (stat.audioLevel !== undefined) level = stat.audioLevel;
+      }
+      if (local && stat.type === 'media-source' && stat.audioLevel !== undefined) level = stat.audioLevel;
+    });
+
+    const key = publication.trackSid;
+    const now = performance.now();
+    const before = previous.get(key);
+    previous.set(key, { bytes, at: now });
+    const kbps = before ? ((bytes - before.bytes) * 8) / (now - before.at) : null;
+
+    return {
+      direction: local ? 'Sent' : 'Received',
+      participant: local ? 'You' : participant.name || participant.identity,
+      kind: publication.kind,
+      muted: publication.isMuted,
+      kbps,
+      level,
+      bytes,
+      flowing: kbps !== null && kbps > 0,
+    };
+  }
+
+  function render(rows) {
+    lastRows = rows;
+    const body = $('rows');
+    body.replaceChildren();
+    if (!rows.length) {
+      const tr = document.createElement('tr');
+      tr.append(Object.assign(document.createElement('td'), { colSpan: 6, textContent: 'No track yet.' }));
+      body.append(tr);
+      return;
+    }
+    for (const row of rows) {
+      const tr = document.createElement('tr');
+      const result = row.muted
+        ? ['Muted', 'wait']
+        : row.kbps === null
+          ? ['Measuring…', 'wait']
+          : row.flowing
+            ? ['OK', 'ok']
+            : ['No data', 'ko'];
+      const cells = [
+        row.direction,
+        row.participant,
+        row.kind,
+        row.kbps === null ? '–' : `${Math.round(row.kbps)} kbps`,
+        row.level === null ? '–' : row.level.toFixed(3),
+      ];
+      for (const text of cells) tr.append(Object.assign(document.createElement('td'), { textContent: text }));
+      tr.append(Object.assign(document.createElement('td'), { textContent: result[0], className: result[1] }));
+      body.append(tr);
+    }
+  }
+
+  async function refreshStats() {
+    if (!room) return;
+    const participants = [room.localParticipant, ...room.remoteParticipants.values()];
+    const work = participants.flatMap((participant) =>
+      [...participant.trackPublications.values()].map((publication) => measure(publication, participant)),
+    );
+    const rows = await Promise.all(work);
+    render(rows.filter(Boolean));
+  }
+
+  // No secret in here: used to read the measures from the console.
+  window.guestCheck = () => ({
+    state: room?.state ?? 'none',
+    canPlaybackAudio: room?.canPlaybackAudio ?? null,
+    remoteParticipants: room?.remoteParticipants.size ?? 0,
+    rows: lastRows,
+    micMuted: micMuted(),
+    handRaised,
+    events,
+    videos: [...document.querySelectorAll('video')].map((v) => ({ width: v.videoWidth, height: v.videoHeight, paused: v.paused })),
+  });
+
+  // ── Connection ────────────────────────────────────────────────────────────────
+  async function publishMedia(synth) {
+    const local = room.localParticipant;
+    if (synth) {
+      await local.publishTrack(synth.video, { source: Track.Source.Camera, name: 'test-video' });
+      await local.publishTrack(synth.audio, { source: Track.Source.Microphone, name: 'test-audio' });
+      return [];
+    }
+    const problems = [];
+    await local.setCameraEnabled(true).catch((e) => problems.push(`camera: ${e.message}`));
+    await local.setMicrophoneEnabled(true).catch((e) => problems.push(`microphone: ${e.message}`));
+    return problems;
+  }
+
+  async function connect(access, synth) {
+    room = new Room({ adaptiveStream: true, dynacast: true });
+    const updateSound = () => { $('sound').hidden = room.canPlaybackAudio; };
+    room
+      .on(RoomEvent.TrackSubscribed, (track, _publication, participant) => attach(track, participant))
+      .on(RoomEvent.TrackUnsubscribed, (track, _publication, participant) => detach(track, participant))
+      .on(RoomEvent.LocalTrackPublished, (publication, participant) => attach(publication.track, participant))
+      .on(RoomEvent.LocalTrackUnpublished, (publication, participant) => detach(publication.track, participant))
+      .on(RoomEvent.AudioPlaybackStatusChanged, updateSound)
+      .on(RoomEvent.TrackMuted, (publication, participant) => onMute(publication, participant, true))
+      .on(RoomEvent.TrackUnmuted, (publication, participant) => onMute(publication, participant, false))
+      .on(RoomEvent.ParticipantAttributesChanged, onAttributes)
+      .on(RoomEvent.Disconnected, () => reset('Disconnected.'));
+
+    setStatus('Connecting to LiveKit…', 'wait');
+    await room.connect(access.url, access.token);
+    updateSound();
+    const problems = await publishMedia(synth);
+    setStatus(
+      problems.length ? `Connected, with problems. ${problems.join(' · ')}` : 'Connected.',
+      problems.length ? 'ko' : 'ok',
+    );
+    statsTimer = setInterval(() => refreshStats().catch(() => {}), 2000);
+    refreshStats().catch(() => {});
+    handRaised = Boolean(room.localParticipant.attributes?.handRaisedAt);
+    $('mic').hidden = false;
+    $('hand').hidden = false;
+    updateControls();
+  }
+
+  function onMute(publication, participant, muted) {
+    if (publication.source !== Track.Source.Microphone) return;
+    const word = muted ? 'muted' : 'unmuted';
+    if (!participant.isLocal) logEvent(`${participant.name || participant.identity} ${word}`);
+    else logEvent(selfMuting ? `You ${word} yourself` : `Microphone ${word} remotely`);
+    updateControls();
+  }
+
+  function onAttributes(changed, participant) {
+    if (!('handRaisedAt' in changed)) return;
+    const raised = Boolean(changed.handRaisedAt);
+    const word = raised ? 'raised' : 'lowered';
+    if (!participant.isLocal) {
+      logEvent(`${participant.name || participant.identity} ${word} their hand`);
+      return;
+    }
+    handRaised = raised;
+    logEvent(selfHand ? `You ${word} your hand` : `Your hand was ${word} remotely`);
+    selfHand = false;
+    updateControls();
+  }
+
+  function reset(message) {
+    clearInterval(statsTimer);
+    entryId = null;
+    handRaised = false;
+    selfMuting = false;
+    selfHand = false;
+    $('mic').hidden = true;
+    $('hand').hidden = true;
+    stopSynth?.();
+    stopSynth = null;
+    room = null;
+    previous.clear();
+    render([]);
+    $('tiles').replaceChildren();
+    $('audio').replaceChildren();
+    $('join').disabled = false;
+    $('leave').hidden = true;
+    $('sound').hidden = true;
+    setStatus(message);
+  }
+
+  $('form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    cancelled = false;
+    $('join').disabled = true;
+    $('leave').hidden = false;
+    // Created during the click, so that the browser allows its audio.
+    const synth = $('synth').checked ? createSynth() : null;
+    stopSynth = synth ? () => synth.stop() : null;
+    try {
+      setStatus('Asking to enter…', 'wait');
+      let entry = await post('/api/guest/join', {
+        room: $('room').value,
+        displayName: $('name').value,
+        platformKey: $('platform').value || undefined,
+      });
+      while (entry.status === 'waiting' && !cancelled) {
+        setStatus('In the waiting room: an organizer must let you in from the web app.', 'wait');
+        await sleep(3000);
+        if (!cancelled) entry = await post('/api/guest/poll', { entryId: entry.entryId });
+      }
+      if (cancelled) return;
+      if (entry.status === 'denied') return reset('The host refused the entry.');
+      entryId = entry.entryId;
+      await connect(entry, synth);
+    } catch (e) {
+      const wait = e.retryAfter ? ` Wait ${e.retryAfter} s.` : '';
+      await room?.disconnect();
+      reset(`Failed: ${e.message}${wait}`);
+      $('status').className = 'ko';
+    }
+  });
+
+  $('leave').addEventListener('click', async () => {
+    cancelled = true;
+    if (room) await room.disconnect();
+    else reset('Left the waiting room.');
+  });
+
+  $('sound').addEventListener('click', () => room?.startAudio());
+
+  $('mic').addEventListener('click', async () => {
+    selfMuting = true;
+    try {
+      await room.localParticipant.setMicrophoneEnabled(Boolean(micMuted()));
+    } catch (e) {
+      logEvent(`Microphone failed: ${e.message}`);
+    } finally {
+      selfMuting = false;
+      updateControls();
+    }
+  });
+
+  $('hand').addEventListener('click', async () => {
+    selfHand = true;
+    $('hand').disabled = true;
+    try {
+      await post('/api/guest/raise-hand', { entryId, raised: !handRaised });
+    } catch (e) {
+      selfHand = false;
+      logEvent(`Raise hand failed: ${e.message}`);
+    } finally {
+      $('hand').disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

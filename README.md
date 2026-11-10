@@ -24,6 +24,40 @@ increasingly blocked by browsers. Headless removes all of that. Self mic/cam/scr
 animated reactions are done **client-side** via `livekit-client` (the proxy's
 server-sent reaction can't animate — here it does).
 
+## Guest check on any catalog platform
+
+Joins an existing room as a guest with `MeetGuestClient`, on any platform of a platform
+catalog, and shows whether audio and video really go through. No proxy and no API key.
+Nothing is built in the SDK: give the catalog URL you were given, and the platforms the
+room may use.
+
+```bash
+# @openvisio/sdk-js comes from ../openvisio-sdk-js until 2.2.0 is published: build it first.
+npm --prefix ../openvisio-sdk-js run build
+
+npm install
+CATALOG_URL=<catalog URL> PLATFORM_KEYS=<key>[,<key>…] npm run guest   # → http://localhost:4100
+```
+
+`PLATFORM_KEYS` lists the platforms this room may use, as a Mago licence will send them:
+the page shows only those, preselects the first, and refuses a room URL of any other
+platform. Without it, the configuration's default applies: `openvisio`.
+
+With a platform selected, type the room slug or its full URL. With **Detect from the URL**,
+paste the full room URL: the platform is found from its address in the catalog. The query
+string can prefill both, e.g. `?platform=<key>&room=abc-defg-hij&synth`, and `?platform=`
+empty detects from the URL.
+
+If the room has a waiting room, the guest waits until an organizer lets them in from the
+platform's web app. A public room lets the guest in at once.
+
+To test without a camera or a second person, open two tabs on the same room with
+**Test source** ticked: each sends a moving pattern and a quiet beep to the other. Anyone
+already in the room hears the beep.
+
+Once connected, **Mute** and **Raise hand** act for the guest. The **Events** list tells your own
+actions from those of the host, such as `Microphone muted remotely` or `Your hand was lowered remotely`.
+
 ## Run
 
 ```bash
