@@ -5,10 +5,11 @@
   "type": "module",
   "description": "Throwaway end-to-end demo of @openvisio/sdk-js against the staging api.",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "guest": "node guest.mjs"
   },
   "dependencies": {
-    "@openvisio/sdk-js": "^2.0.1",
+    "@openvisio/sdk-js": "file:../openvisio-sdk-js",
     "express": "^4.19.2"
   }
 }
