@@ -32,9 +32,6 @@ Nothing is built in the SDK: give the catalog URL you were given, and the platfo
 room may use.
 
 ```bash
-# @openvisio/sdk-js comes from ../openvisio-sdk-js until 2.2.0 is published: build it first.
-npm --prefix ../openvisio-sdk-js run build
-
 npm install
 CATALOG_URL=<catalog URL> PLATFORM_KEYS=<key>[,<key>…] npm run guest   # → http://localhost:4100
 ```
@@ -55,7 +52,8 @@ To test without a camera or a second person, open two tabs on the same room with
 **Test source** ticked: each sends a moving pattern and a quiet beep to the other. Anyone
 already in the room hears the beep.
 
-Once connected, **Mute** and **Raise hand** act for the guest. The **Events** list tells your own
+Once connected, **Mute**, **Raise hand**, **Camera off** and **Share screen** act for the guest,
+and the **Reactions** and **Chat** sections send to and receive from the room, in Meet's formats. The **Events** list tells your own
 actions from those of the host, such as `Microphone muted remotely` or `Your hand was lowered remotely`.
 
 ## Run

@@ -9,7 +9,7 @@
     "guest": "node guest.mjs"
   },
   "dependencies": {
-    "@openvisio/sdk-js": "file:../openvisio-sdk-js",
+    "@openvisio/sdk-js": "^2.2.0",
     "express": "^4.19.2"
   }
 }

@@ -25,6 +25,12 @@
   .tile { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
   .tile video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; object-fit: contain; }
   .tile p { margin: 0; padding: 4px 8px; font-size: 13px; }
+  #reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+  #reactions button { padding: 4px 8px; font-size: 18px; line-height: 1; }
+  #chat-log { list-style: none; margin: 0 0 8px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; max-height: 220px; overflow-y: auto; }
+  #chat-log li { overflow-wrap: anywhere; }
+  #chat-log b { font-weight: 600; }
+  #chat-form { display: flex; gap: 8px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -43,6 +49,8 @@
   <button id="sound" type="button" hidden>Enable sound</button>
   <button id="mic" type="button" hidden>Mute</button>
   <button id="hand" type="button" hidden>Raise hand</button>
+  <button id="camera" type="button" hidden>Camera off</button>
+  <button id="screen" type="button" hidden>Share screen</button>
 </form>
 
 <p id="status" role="status">Not connected.</p>
@@ -58,6 +66,23 @@
 <h2>Video</h2>
 <div id="tiles"></div>
 <div id="audio" hidden></div>
+
+<section id="interact" hidden>
+  <h2>Reactions</h2>
+  <div id="reactions">
+    <button type="button" data-emoji="party-popper">🎉</button>
+    <button type="button" data-emoji="thumbs-up">👍</button>
+    <button type="button" data-emoji="clapping-hands">👏</button>
+    <button type="button" data-emoji="folded-hands">🙏</button>
+    <button type="button" data-emoji="red-heart">❤️</button>
+  </div>
+  <h2>Chat</h2>
+  <ol id="chat-log" aria-live="polite"></ol>
+  <form id="chat-form">
+    <input id="chat-text" type="text" maxlength="4000" placeholder="Message to everyone" aria-label="Chat message" autocomplete="off">
+    <button type="submit">Send</button>
+  </form>
+</section>
 
 <h2>Events</h2>
 <ol id="events"></ol>
@@ -91,6 +116,7 @@
 
   let room = null;
   let stopSynth = null;
+  let synthTracks = null; // test source → track, kept to publish it again
   let cancelled = false;
   let statsTimer = null;
   const previous = new Map(); // track sid → { bytes, at }
@@ -101,6 +127,7 @@
   // True while this page acts, to tell its own changes from what the host does.
   let selfMuting = false;
   let selfHand = false;
+  let chat = [];
 
   function logEvent(text) {
     const line = `${new Date().toLocaleTimeString()} ${text}`;
@@ -108,11 +135,36 @@
     $('events').prepend(Object.assign(document.createElement('li'), { textContent: line }));
   }
 
-  const micMuted = () => room?.localParticipant.getTrackPublication(Track.Source.Microphone)?.isMuted ?? null;
+  const micMuted = () => (room ? !room.localParticipant.isMicrophoneEnabled : null);
+
+  // The host can disable microphones, cameras or screen sharing for participants: Meet then
+  // removes the source from their LiveKit permissions (an empty list allows every source).
+  const LABELS = { [Track.Source.Camera]: 'Camera', [Track.Source.Microphone]: 'Microphone', [Track.Source.ScreenShare]: 'Screen sharing' };
+  const SOURCE_IDS = { [Track.Source.Camera]: 1, [Track.Source.Microphone]: 2, [Track.Source.ScreenShare]: 3 };
+  function allowed(source, permissions = room?.localParticipant.permissions) {
+    if (!permissions) return true;
+    const sources = permissions.canPublishSources ?? [];
+    return permissions.canPublish !== false && (!sources.length || sources.includes(SOURCE_IDS[source]));
+  }
+  const nameOf = (participant) => participant?.name || participant?.identity || 'Someone';
 
   function updateControls() {
     $('mic').textContent = micMuted() ? 'Unmute' : 'Mute';
+    $('mic').disabled = !allowed(Track.Source.Microphone);
+    $('camera').disabled = !allowed(Track.Source.Camera);
+    $('screen').disabled = !allowed(Track.Source.ScreenShare);
     $('hand').textContent = handRaised ? 'Lower hand' : 'Raise hand';
+    $('camera').textContent = room?.localParticipant.isCameraEnabled ? 'Camera off' : 'Camera on';
+    $('screen').textContent = room?.localParticipant.isScreenShareEnabled ? 'Stop sharing' : 'Share screen';
+  }
+
+  function addChat(from, text) {
+    const at = new Date().toLocaleTimeString();
+    chat.push({ at, from, text });
+    const li = document.createElement('li');
+    li.append(`${at} `, Object.assign(document.createElement('b'), { textContent: from }), `: ${text}`);
+    $('chat-log').append(li);
+    $('chat-log').scrollTop = $('chat-log').scrollHeight;
   }
 
   const setStatus = (text, cls = '') => { $('status').textContent = text; $('status').className = cls; };
@@ -274,26 +326,50 @@
     rows: lastRows,
     micMuted: micMuted(),
     handRaised,
+    cameraEnabled: room?.localParticipant.isCameraEnabled ?? null,
+    sharingScreen: room?.localParticipant.isScreenShareEnabled ?? null,
+    chat,
     events,
     videos: [...document.querySelectorAll('video')].map((v) => ({ width: v.videoWidth, height: v.videoHeight, paused: v.paused })),
   });
 
   // ── Connection ────────────────────────────────────────────────────────────────
-  async function publishMedia(synth) {
+  /** Turns a source on or off; the test source is published again after the host removed it. */
+  async function setSource(source, enabled) {
     const local = room.localParticipant;
-    if (synth) {
-      await local.publishTrack(synth.video, { source: Track.Source.Camera, name: 'test-video' });
-      await local.publishTrack(synth.audio, { source: Track.Source.Microphone, name: 'test-audio' });
-      return [];
-    }
+    const test = synthTracks?.[source];
+    if (enabled && test && !local.getTrackPublication(source)) return local.publishTrack(test, { source });
+    if (source === Track.Source.Microphone) return local.setMicrophoneEnabled(enabled);
+    if (source === Track.Source.Camera) return local.setCameraEnabled(enabled);
+    return local.setScreenShareEnabled(enabled);
+  }
+
+  async function publishMedia() {
     const problems = [];
-    await local.setCameraEnabled(true).catch((e) => problems.push(`camera: ${e.message}`));
-    await local.setMicrophoneEnabled(true).catch((e) => problems.push(`microphone: ${e.message}`));
+    for (const source of [Track.Source.Camera, Track.Source.Microphone]) {
+      if (!allowed(source)) logEvent(`${LABELS[source]} disabled by the host`);
+      else await setSource(source, true).catch((e) => problems.push(`${source}: ${e.message}`));
+    }
     return problems;
   }
 
+  function onPermissions(before, participant) {
+    if (!participant.isLocal) return;
+    for (const source of Object.keys(LABELS)) {
+      const now = allowed(source);
+      if (now === allowed(source, before)) continue;
+      logEvent(`${LABELS[source]} ${now ? 'allowed again' : 'disabled'} by the host`);
+      // LiveKit removes the track itself; this covers a server that does not.
+      const track = participant.getTrackPublication(source)?.track;
+      if (!now && track) participant.unpublishTrack(track, !synthTracks).catch(() => {});
+    }
+    updateControls();
+  }
+
   async function connect(access, synth) {
-    room = new Room({ adaptiveStream: true, dynacast: true });
+    synthTracks = synth && { [Track.Source.Camera]: synth.video, [Track.Source.Microphone]: synth.audio };
+    // Keeps the test source alive when the host removes it, to publish it again later.
+    room = new Room({ adaptiveStream: true, dynacast: true, stopLocalTrackOnUnpublish: !synth });
     const updateSound = () => { $('sound').hidden = room.canPlaybackAudio; };
     room
       .on(RoomEvent.TrackSubscribed, (track, _publication, participant) => attach(track, participant))
@@ -304,12 +380,16 @@
       .on(RoomEvent.TrackMuted, (publication, participant) => onMute(publication, participant, true))
       .on(RoomEvent.TrackUnmuted, (publication, participant) => onMute(publication, participant, false))
       .on(RoomEvent.ParticipantAttributesChanged, onAttributes)
+      .on(RoomEvent.ParticipantPermissionsChanged, onPermissions)
+      .on(RoomEvent.DataReceived, onData)
+      // Also when sharing stops from the browser's own "Stop sharing" bar.
+      .on(RoomEvent.LocalTrackUnpublished, () => updateControls())
       .on(RoomEvent.Disconnected, () => reset('Disconnected.'));
 
     setStatus('Connecting to LiveKit…', 'wait');
     await room.connect(access.url, access.token);
     updateSound();
-    const problems = await publishMedia(synth);
+    const problems = await publishMedia();
     setStatus(
       problems.length ? `Connected, with problems. ${problems.join(' · ')}` : 'Connected.',
       problems.length ? 'ko' : 'ok',
@@ -317,10 +397,21 @@
     statsTimer = setInterval(() => refreshStats().catch(() => {}), 2000);
     refreshStats().catch(() => {});
     handRaised = Boolean(room.localParticipant.attributes?.handRaisedAt);
-    $('mic').hidden = false;
-    $('hand').hidden = false;
+    for (const id of ['mic', 'hand', 'camera', 'screen', 'interact']) $(id).hidden = false;
     updateControls();
   }
+
+  // Same as the 2.1.0 sample: reactions and chat are JSON data messages.
+  function onData(payload, participant) {
+    try {
+      const m = JSON.parse(new TextDecoder().decode(payload));
+      if (m.type === 'reactionReceived') logEvent(`${nameOf(participant)} reacted ${m.data?.emoji}`);
+      else if (m.message) addChat(nameOf(participant), m.message);
+    } catch { /* ignore non-JSON */ }
+  }
+
+  const sendData = (message, topic) =>
+    room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify(message)), { reliable: true, topic });
 
   function onMute(publication, participant, muted) {
     if (publication.source !== Track.Source.Microphone) return;
@@ -350,10 +441,12 @@
     handRaised = false;
     selfMuting = false;
     selfHand = false;
-    $('mic').hidden = true;
-    $('hand').hidden = true;
+    for (const id of ['mic', 'hand', 'camera', 'screen', 'interact']) $(id).hidden = true;
+    $('chat-log').replaceChildren();
+    chat = [];
     stopSynth?.();
     stopSynth = null;
+    synthTracks = null;
     room = null;
     previous.clear();
     render([]);
@@ -408,13 +501,40 @@
   $('mic').addEventListener('click', async () => {
     selfMuting = true;
     try {
-      await room.localParticipant.setMicrophoneEnabled(Boolean(micMuted()));
+      await setSource(Track.Source.Microphone, Boolean(micMuted()));
     } catch (e) {
       logEvent(`Microphone failed: ${e.message}`);
     } finally {
       selfMuting = false;
       updateControls();
     }
+  });
+
+  // Devices, reactions and chat: the same calls as the 2.1.0 sample.
+  $('camera').addEventListener('click', async () => {
+    await setSource(Track.Source.Camera, !room.localParticipant.isCameraEnabled).catch((e) => logEvent(`Camera failed: ${e.message}`));
+    updateControls();
+  });
+
+  $('screen').addEventListener('click', async () => {
+    await setSource(Track.Source.ScreenShare, !room.localParticipant.isScreenShareEnabled).catch((e) => logEvent(`Screen share failed: ${e.message}`));
+    updateControls();
+  });
+
+  for (const button of $('reactions').querySelectorAll('button')) {
+    button.addEventListener('click', () =>
+      sendData({ type: 'reactionReceived', data: { emoji: button.dataset.emoji } })
+        .then(() => logEvent(`You reacted ${button.textContent}`), (e) => logEvent(`Reaction failed: ${e.message}`)));
+  }
+
+  // Meet's chat channel; its web app shows these messages, older and newer versions alike.
+  $('chat-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const message = $('chat-text').value.trim();
+    if (!message || !room) return;
+    $('chat-text').value = '';
+    await sendData({ id: crypto.randomUUID(), timestamp: Date.now(), message }, 'lk-chat-topic')
+      .then(() => addChat('You', message), (e) => logEvent(`Chat failed: ${e.message}`));
   });
 
   $('hand').addEventListener('click', async () => {
